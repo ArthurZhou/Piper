@@ -25,10 +25,10 @@ struct Context { // message transfer structure
 	uuid      string // uuid
 mut:
 	jump int // how many times has this message been repeated
+	port int
 }
 
 struct Client { // structure used to save clients in a client list
-	addr     string    // relay server address
 	time_reg time.Time // registration time
 	max_msg  int       // max message amount can be sent to this client(if reached this limit, the client will be removed from the list)
 mut:
@@ -43,6 +43,7 @@ fn send_msg(msg string) { // render and broadcast input msg to all clients
 			name: my_name
 			uuid: my_uuid
 			jump: 0
+			port: host_port
 		})
 		send(data, '') // set except to nothing to send the message to everyone
 	}
@@ -51,9 +52,9 @@ fn send_msg(msg string) { // render and broadcast input msg to all clients
 fn send(msg string, except string) {
 	for index, mut client in client_list {
 		if client.current_msg <= client.max_msg || client.max_msg == -1 {
-			if client.addr != except { // send to all clients except someone, useful when repeating messages(except the client who sent me this message)
-				l.debug('sending message to ${client.addr}. ${client.current_msg}/${client.max_msg} message(s) already transferred.')
-				mut s := net.dial_udp(client.addr) or {
+			if index != except { // send to all clients except someone, useful when repeating messages(except the client who sent me this message)
+				l.debug('sending message to ${index}. ${client.current_msg}/${client.max_msg} message(s) already transferred.')
+				mut s := net.dial_udp(index) or {
 					l.warn(err.str())
 					return
 				}
@@ -62,11 +63,11 @@ fn send(msg string, except string) {
 					return
 				}
 				s.close() or { return }
-				l.debug('done sending message to ${client.addr}.')
+				l.debug('done sending message to ${index}.')
 			}
 			client.current_msg += 1
 		} else {
-			l.debug('client ${client.addr} reach the limit of ${client.max_msg} message(s). now removing from list.')
+			l.debug('client ${index} reach the limit of ${client.max_msg} message(s). now removing from list.')
 			client_list.delete(index)
 		}
 	}
@@ -89,18 +90,18 @@ fn receive_msg(addr string) {
 			return
 		}
 		if data.operation == 'msg' {
+			if client_list[client_addr.str()] == Client{} {
+				client_list[client_addr.str().split(':')[0] + ':' + data.port.str()] = Client{
+					time_reg: time.now()
+					max_msg: 256
+					current_msg: 0
+				}
+			}
 			p.info('(${data.name}) > ${data.msg}')
 			if data.jump < 3 {
 				data.jump += 1
+				data.port = host_port
 				send(json.encode(data), client_addr.str())
-			}
-		} else if data.operation == 'reg' {
-			client_ip := client_addr.str().split(':')[0]
-			client_list[client_ip + ':' + data.msg] = Client{
-				addr: client_ip + ':' + data.msg
-				time_reg: time.now()
-				max_msg: 128
-				current_msg: 0
 			}
 		} else if data.operation == 'relay' {
 			mut relays := client_list.clone()
@@ -113,23 +114,6 @@ fn receive_msg(addr string) {
 			l.warn('unknown operation: ${data.operation} from ${client_addr.str()}')
 		}
 	}
-}
-
-fn register(client Client) {
-	mut s := net.dial_udp(client.addr) or {
-		l.info(err.str())
-		return
-	}
-	data := json.encode(Context{
-		operation: 'reg'
-		msg: host_port.str()
-	})
-	s.write_string(data) or {
-		l.info(err.str())
-		return
-	}
-	client_list[client.addr] = client
-	get_relay(client.addr)
 }
 
 fn get_relay(addr string) {
@@ -154,19 +138,17 @@ fn get_relay(addr string) {
 		return
 	}
 	for key, mut relay in relays {
-		index, _ := client_list.key_to_index(key)
-		if index == u32(-1) {
+		if client_list[key] == Client{} {
 			relay.current_msg = 0
 			client_list[key] = relay
 		}
 	}
-	println(client_list)
 }
 
 fn main() {
 	mut fp := flag.new_flag_parser(os.args)
 	fp.application('Piper')
-	fp.version('v0.1.1')
+	fp.version('v0.1.2')
 
 	remote_addr = fp.string('server', `s`, '', 'Remote server address  split addresses with `;`').split(';')
 	host_port = fp.int('host', `h`, 28174, 'Local server port  default: 28174')
@@ -182,14 +164,13 @@ fn main() {
 	p = &log.Log{}
 	p.set_output_level(log.Level.info)
 
-	if remote_addr != [] {
+	if remote_addr != [''] {
 		for addr in remote_addr {
-			register(Client{
-				addr: addr
+			client_list[addr] = Client{
 				time_reg: time.now()
 				max_msg: 256
 				current_msg: 0
-			})
+			}
 		}
 	}
 
