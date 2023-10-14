@@ -7,15 +7,18 @@ import rand
 import log
 import time
 import json
+import crypto.md5
 
 __global (
 	remote_addr []string // connect to target at launch
 	host_port   int // the port of local relay server
 	my_name     string // username
 	my_uuid     string // uuid(random by default)
+	auth_limit  int // show a message if it has been received for certain times
 	p           &log.Log // message output
 	l           &log.Log // log output
 	client_list map[string]Client // all connected clients(relays)
+	unauth_msg  map[string]UnauthMsg // unauthorized messages
 )
 
 struct Context { // message transfer structure
@@ -23,6 +26,7 @@ struct Context { // message transfer structure
 	msg       string // body of msg, this section will be the port number of local relay server when operation is `reg`
 	name      string // username
 	uuid      string // uuid
+	send_time string
 mut:
 	jump int // how many times has this message been repeated
 	port int
@@ -35,6 +39,11 @@ mut:
 	current_msg int // how many messages have been sent to this client
 }
 
+struct UnauthMsg {
+mut:
+	msgs map[string]int
+}
+
 fn send_msg(msg string) { // render and broadcast input msg to all clients
 	if client_list.len > 0 {
 		data := json.encode(Context{
@@ -44,6 +53,7 @@ fn send_msg(msg string) { // render and broadcast input msg to all clients
 			uuid: my_uuid
 			jump: 0
 			port: host_port
+			send_time: time.now().format()
 		})
 		send(data, '') // set except to nothing to send the message to everyone
 	}
@@ -97,7 +107,7 @@ fn receive_msg(addr string) {
 					current_msg: 0
 				}
 			}
-			p.info('(${data.name}) > ${data.msg}')
+			auth_msg(data)
 			if data.jump < 3 {
 				data.jump += 1
 				data.port = host_port
@@ -112,6 +122,27 @@ fn receive_msg(addr string) {
 			}
 		} else {
 			l.warn('unknown operation: ${data.operation} from ${client_addr.str()}')
+		}
+	}
+}
+
+fn auth_msg(msg Context) {
+	msg_id := md5.hexhash(msg.name + msg.uuid + msg.send_time)
+	if unauth_msg[msg_id] == UnauthMsg{} {
+		unauth_msg[msg_id] = UnauthMsg{
+			msgs: {
+				msg.msg: 1
+			}
+		}
+	} else {
+		if unauth_msg[msg_id].msgs[msg.msg] == 0 {
+			unauth_msg[msg_id].msgs[msg.msg] = 1
+		} else {
+			if unauth_msg[msg_id].msgs[msg.msg] >= auth_limit {
+				p.info('(${msg.name}) > ${msg.msg}')
+			} else {
+				unauth_msg[msg_id].msgs[msg.msg]++
+			}
 		}
 	}
 }
@@ -148,12 +179,13 @@ fn get_relay(addr string) {
 fn main() {
 	mut fp := flag.new_flag_parser(os.args)
 	fp.application('Piper')
-	fp.version('v0.1.2')
+	fp.version('v0.1.3-beta1')
 
 	remote_addr = fp.string('server', `s`, '', 'Remote server address  split addresses with `;`').split(';')
 	host_port = fp.int('host', `h`, 28174, 'Local server port  default: 28174')
 	my_name = fp.string('name', `n`, 'user-0', 'Username  default: user-0')
 	my_uuid = fp.string('uuid', `u`, rand.uuid_v4(), 'UUID(You should not change this by default)  default: <random v4 uuid>')
+	auth_limit = fp.int('auth limit', `a`, 2, 'Auth limit  default: 2')
 	if os.args.contains('--help') {
 		println(fp.usage())
 		exit(0)
